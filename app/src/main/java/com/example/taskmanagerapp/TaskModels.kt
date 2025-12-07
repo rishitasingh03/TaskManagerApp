@@ -32,7 +32,8 @@ data class Task(
     val creationTimeMillis: Long,
     val priority: TaskPriority,
     val status: TaskStatus,
-    val reminderDaysBefore: List<Int> // number of days before completion time (1,2,3).
+    val reminderDaysBefore: List<Int>, // number of days before completion time (1,2,3).
+    val orderIndex: Int = 0 // list ordering index (0 = top)
 )
 
 
@@ -59,7 +60,8 @@ data class TaskFormState(
 data class TaskUiState(
     val tasks: List<Task> = emptyList(),
     val isFormVisible: Boolean = false,
-    val formState: TaskFormState = TaskFormState()
+    val formState: TaskFormState = TaskFormState(),
+    val errorMessage: String? = null //error message for UI to show
 )
 
 // Date/time helper functions

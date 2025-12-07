@@ -1,13 +1,15 @@
 package com.example.taskmanagerapp
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material3.*
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -20,28 +22,44 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.ui.zIndex
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
 
-
-//wires viewmodel to ui
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TaskManagerApp(taskViewModel: TaskViewModel) {
     val uiState = taskViewModel.uiState
-
+    val snackbarHostState = remember { SnackbarHostState() }
     MaterialTheme {
         Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("Task Manager") }
-                )
-            },
+            topBar = { TopAppBar(title = { Text("Task Manager") }) },
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
-                // Floating Action Button visible only when form is hidden
                 if (!uiState.isFormVisible) {
                     FloatingActionButton(onClick = { taskViewModel.startAddTask() }) {
                         Text("+")
@@ -53,7 +71,7 @@ fun TaskManagerApp(taskViewModel: TaskViewModel) {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
-            ) { //callbacks passed that call viewmodel methods
+            ) {
                 TaskManagerScreen(
                     uiState = uiState,
                     onAddTask = { taskViewModel.startAddTask() },
@@ -69,14 +87,19 @@ fun TaskManagerApp(taskViewModel: TaskViewModel) {
                     onReminderDay3Change = taskViewModel::updateReminderDay3,
                     onCancel = taskViewModel::cancelEditing,
                     onSave = taskViewModel::saveTask,
-                    onDelete = taskViewModel::deleteCurrentTask
+                    onDelete = taskViewModel::deleteCurrentTask,
+                    onMove = { from, to -> taskViewModel.moveTask(from, to) },
+                    onDeleteAt = { idx -> taskViewModel.deleteTaskAt(idx) },
+                    onInsertAt = { idx, task -> taskViewModel.insertTaskAt(idx, task) },
+                    onCompleteAt = { idx -> taskViewModel.completeTaskAt(idx) },
+                    onRestoreAt = { idx, prev -> taskViewModel.restoreTaskAt(idx, prev) },
+                    snackbarHostState = snackbarHostState,
+                    onClearError = { taskViewModel.clearError() }
                 )
             }
         }
     }
 }
-
- //Main screen combining-task list And Task form for Add or Edit
 
 @Composable
 fun TaskManagerScreen(
@@ -94,57 +117,357 @@ fun TaskManagerScreen(
     onReminderDay3Change: (Boolean) -> Unit,
     onCancel: () -> Unit,
     onSave: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onMove: (fromIndex: Int, toIndex: Int) -> Unit,
+    onDeleteAt: (index: Int) -> Task?,
+    onInsertAt: (index: Int, task: Task) -> Unit,
+    onCompleteAt: (index: Int) -> Task?,
+    onRestoreAt: (index: Int, previous: Task) -> Unit,
+    snackbarHostState: SnackbarHostState,
+    onClearError: () -> Unit,
+    onOpenAdd: () -> Unit = onAddTask
 ) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    // show global form errors as snackbar
+    LaunchedEffect(uiState.formState.errorMessage) {
+        uiState.formState.errorMessage?.let { message ->
+            snackbarHostState.showSnackbar(message = message, duration = SnackbarDuration.Short)
+            onClearError()
+        }
+    }
 
-        Text(
-            text = "Your Tasks",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (uiState.tasks.isEmpty()) {
-            Text("No tasks yet. Tap + to add a new task.")
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f)
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Main content
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                items(uiState.tasks) { task ->
-                    TaskListItem(task = task, onClick = { onTaskClick(task) })
-                    HorizontalDivider()
-                }
+                Text(
+                    text = "Your Tasks",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            if (uiState.tasks.isEmpty()) {
+                Text("No tasks yet. Tap + to add a new task.")
+            } else {
+                ReorderableTaskList(
+                    modifier = Modifier.weight(1f),
+                    tasks = uiState.tasks,
+                    onTaskClick = onTaskClick,
+                    onMove = onMove,
+                    onCompleteAt = onCompleteAt,
+                    onRestoreAt = onRestoreAt,
+                    onDeleteAt = onDeleteAt,
+                    onInsertAt = onInsertAt,
+                    snackbarHostState = snackbarHostState
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
+        // Full-screen overlay for form; covers entire screen and blocks interaction below
         if (uiState.isFormVisible) {
-            HorizontalDivider(thickness = 1.dp)
-            Spacer(modifier = Modifier.height(8.dp))
-            TaskForm(
-                formState = uiState.formState,
-                onTitleChange = onTitleChange,
-                onDescriptionChange = onDescriptionChange,
-                onCompletionDateChange = onCompletionDateChange,
-                onCompletionTimeChange = onCompletionTimeChange,
-                onPriorityChange = onPriorityChange,
-                onStatusChange = onStatusChange,
-                onReminderDay1Change = onReminderDay1Change,
-                onReminderDay2Change = onReminderDay2Change,
-                onReminderDay3Change = onReminderDay3Change,
-                onCancel = onCancel,
-                onSave = onSave,
-                onDelete = onDelete
-            )
+            Surface(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(100f),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // Header (custom top bar)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        IconButton(onClick = onCancel) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Close"
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Text(
+                            text = if (uiState.formState.taskIdBeingEdited == null) "New Task" else "Edit Task",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.align(Alignment.CenterVertically)
+                        )
+                    }
+
+                    // Scrollable form area
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp)
+                            .imePadding()
+                    ) {
+                        TaskForm(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.TopCenter),
+                            formState = uiState.formState,
+                            onTitleChange = onTitleChange,
+                            onDescriptionChange = onDescriptionChange,
+                            onCompletionDateChange = onCompletionDateChange,
+                            onCompletionTimeChange = onCompletionTimeChange,
+                            onPriorityChange = onPriorityChange,
+                            onStatusChange = onStatusChange,
+                            onReminderDay1Change = onReminderDay1Change,
+                            onReminderDay2Change = onReminderDay2Change,
+                            onReminderDay3Change = onReminderDay3Change,
+                            onCancel = onCancel,
+                            onSave = onSave,
+                            onDelete = onDelete
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
+ // When long-press drag starts, track vertical drag distance (dy).
+ // Every time dy crosses one item height, move the item up/down by 1 index.
 
-//task list.
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun ReorderableTaskList(
+    modifier: Modifier = Modifier,
+    tasks: List<Task>,
+    onTaskClick: (Task) -> Unit,
+    onMove: (fromIndex: Int, toIndex: Int) -> Unit,
+    onDeleteAt: (index: Int) -> Task?,
+    onInsertAt: (index: Int, task: Task) -> Unit,
+    onCompleteAt: (index: Int) -> Task?,
+    onRestoreAt: (index: Int, previous: Task) -> Unit,
+    snackbarHostState: SnackbarHostState
+) {
+    if (tasks.size <= 1) { //if list has 0 or 1 item no drag needed
+        LazyColumn(modifier = modifier.fillMaxWidth()) {
+            itemsIndexed(tasks) { _, t ->
+                TaskListItem(task = t, onClick = { onTaskClick(t) })
+                HorizontalDivider()
+            }
+        }
+        return
+    }
+
+    var draggingId by remember { mutableStateOf<Long?>(null) } // id of current task that is dragged
+    var measuredItemPx by remember { mutableStateOf<Float?>(null) } // row height
+    val fallbackItemPx = with(LocalDensity.current) { 120.dp.toPx() }
+    val coroutineScope = rememberCoroutineScope()
+
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            itemsIndexed(tasks, key = { _, t -> t.id }) { index, task ->
+
+                var itemWidthPx by remember { mutableStateOf(0f) }
+
+                val offsetX = remember { Animatable(0f) }
+                var isDismissed by remember { mutableStateOf(false) } //hide item during swipe
+
+                val swipeThresholdPx = itemWidthPx * 0.35f //swipe must pass 35% width to trigger action
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned { coords ->
+                            val height = coords.size.height.toFloat()
+                            if (height > 0f) measuredItemPx = height
+                            itemWidthPx = coords.size.width.toFloat()
+                        }
+                ) {
+                    // SWIPE handling - horizontal drags
+                    val swipeModifier = Modifier.pointerInput(task.id, draggingId) {
+                        // if a drag reorder is active, swipe detection not installed for this item
+                        if (draggingId != null) return@pointerInput
+
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false)
+                            var dragConsumed = false
+
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: break
+
+                                if (change.changedToUp()) break
+
+                                val delta = change.positionChange()
+                                if (delta != Offset.Zero) {
+                                    if (!dragConsumed && kotlin.math.abs(delta.x) > kotlin.math.abs(delta.y)) {
+                                        dragConsumed = true
+                                    }
+
+                                    if (dragConsumed) {
+                                        val newValue = (offsetX.value + delta.x)
+                                            .coerceIn(-itemWidthPx * 2f, itemWidthPx * 2f) //swipe distance
+                                        coroutineScope.launch { offsetX.snapTo(newValue) } //instantly move ui item
+                                        change.consume() //prevent scroll conflict
+                                    }
+                                }
+                            }
+
+                            // decide on release: left swipe -> delete, right swipe -> complete, else reset
+                            val finalX = offsetX.value
+
+                            if (kotlin.math.abs(finalX) > swipeThresholdPx) {
+                                isDismissed = true //hide item temporarily
+
+                                if (finalX < 0f) { //swipe left
+                                    // LEFT swipe -> Delete
+                                    coroutineScope.launch {
+                                        offsetX.animateTo(
+                                            -itemWidthPx * 1.2f,
+                                            animationSpec = tween(200) //animate swipe out
+                                        )
+                                        val removed = onDeleteAt(index) // remove task immediately
+                                        //snackbar with undo option
+                                        if (removed != null) {
+                                            val result = snackbarHostState.showSnackbar(
+                                                message = "Task deleted",
+                                                actionLabel = "Undo",
+                                                duration = SnackbarDuration.Short
+                                            )
+                                            if (result == SnackbarResult.ActionPerformed) {
+                                                onInsertAt(index.coerceIn(0, tasks.size), removed) //undo deletion
+                                            }
+                                        }
+                                        isDismissed = false
+                                        offsetX.snapTo(0f) //reset position after action
+                                    }
+                                } else {
+                                    // RIGHT swipe -> Complete
+                                    coroutineScope.launch {
+                                        offsetX.animateTo(
+                                            itemWidthPx * 1.2f,
+                                            animationSpec = tween(200) //animate right
+                                        )
+                                        val previous = onCompleteAt(index) //mark as complete
+                                        if (previous != null) {
+                                            val result = snackbarHostState.showSnackbar(
+                                                message = "Task marked complete",
+                                                actionLabel = "Undo",
+                                                duration = SnackbarDuration.Short
+                                            )
+                                            if (result == SnackbarResult.ActionPerformed) {
+                                                onRestoreAt(
+                                                    index.coerceIn(0, tasks.size),
+                                                    previous
+                                                )
+                                            }
+                                        }
+                                        isDismissed = false
+                                        offsetX.snapTo(0f)
+                                    }
+                                }
+                            } else {
+                                coroutineScope.launch {
+                                    offsetX.animateTo(0f, animationSpec = tween(200))// snap back to original position
+                                }
+                            }
+                        } // awaitEachGesture
+                    }
+
+                    // REORDER handler: long-press + vertical drag
+                    val reorderModifier = Modifier.pointerInput(task.id) {
+                        var accumulatedDy = 0f //sum of vertical deltas while user drags
+
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { //after lonf press drag starts
+                                draggingId = task.id
+                                accumulatedDy = 0f
+                            },
+                            onDragEnd = { //handle drag end
+                                draggingId = null
+                                accumulatedDy = 0f
+                            },
+                            onDragCancel = { //handle drag cancellation
+                                draggingId = null
+                                accumulatedDy = 0f
+                            },
+                            //handle ongoing drag movements
+                            onDrag = { change: PointerInputChange, dragAmount ->
+                                change.consume()
+
+                                val heightPx = measuredItemPx ?: fallbackItemPx
+                                if (heightPx <= 0f) return@detectDragGesturesAfterLongPress
+
+                                // accumulate vertical drag distance
+                                accumulatedDy += dragAmount.y
+
+                                // how many whole item-heights have crossed
+                                val indexChange = (accumulatedDy / heightPx).toInt()
+                                if (indexChange != 0) {
+                                    val currentIndex =
+                                        tasks.indexOfFirst { it.id == task.id }
+                                    if (currentIndex >= 0) {
+                                        val newIndex = (currentIndex + indexChange)
+                                            .coerceIn(0, tasks.size - 1)
+                                        if (newIndex != currentIndex) {
+                                            onMove(currentIndex, newIndex)
+                                        }
+                                    }
+                                    // subtract the amount used to move items,
+                                    // so small extra movement doesn't cause double moves
+                                    accumulatedDy -= indexChange * heightPx
+                                }
+                            }
+                        )
+                    }
+
+                    // start with base
+                    var finalModifier: Modifier = Modifier.fillMaxWidth()
+
+                    // only animate placement when this item is NOT being dragged
+                    if (draggingId != task.id) {
+                        finalModifier = finalModifier.animateItemPlacement(
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioMediumBouncy,
+                                stiffness = Spring.StiffnessMedium
+                            )
+                        )
+                    }
+
+                    // Horizontal swipe offset + reorder + visuals
+                    finalModifier = finalModifier
+                        .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                        .then(reorderModifier)
+                        .then(swipeModifier)
+                        .zIndex(if (draggingId == task.id) 1f else 0f)
+                        .background(
+                            if (draggingId == task.id)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                            else Color.Transparent
+                        )
+                        .padding(horizontal = 8.dp, vertical = 8.dp)
+
+                    if (!isDismissed) {
+                        Box(modifier = finalModifier) {
+                            TaskListItem(task = task, onClick = { onTaskClick(task) })
+                        }
+                    }
+                } // item Box
+
+                HorizontalDivider()
+            } // itemsIndexed
+        } // LazyColumn
+    } // Box
+}
+
 @Composable
 fun TaskListItem(task: Task, onClick: () -> Unit) {
     val (dateString, timeString) = splitDateAndTime(task.completionTimeMillis)
@@ -153,7 +476,7 @@ fun TaskListItem(task: Task, onClick: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
-            .padding(vertical = 8.dp)
+            .padding(vertical = 4.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically
@@ -172,7 +495,7 @@ fun TaskListItem(task: Task, onClick: () -> Unit) {
             )
         }
 
-        Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         Text(
             text = task.description,
@@ -181,7 +504,7 @@ fun TaskListItem(task: Task, onClick: () -> Unit) {
             overflow = TextOverflow.Ellipsis
         )
 
-        Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         Text(
             text = "Status: ${task.status.label}",
@@ -195,16 +518,18 @@ fun TaskListItem(task: Task, onClick: () -> Unit) {
 
         if (task.reminderDaysBefore.isNotEmpty()) {
             Text(
-                text = "Reminders: ${task.reminderDaysBefore.joinToString { "$it day(s) before" }}",
+                text = "Reminders: ${
+                    task.reminderDaysBefore.joinToString { "$it day(s) before" }
+                }",
                 style = MaterialTheme.typography.bodySmall
             )
         }
     }
 }
 
-//add edit task form
 @Composable
 fun TaskForm(
+    modifier: Modifier = Modifier,
     formState: TaskFormState,
     onTitleChange: (String) -> Unit,
     onDescriptionChange: (String) -> Unit,
@@ -219,169 +544,140 @@ fun TaskForm(
     onSave: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val creationText = formState.creationTimeMillis?.let {
-        "Created: " + formatDateTime(it)
-    } ?: ""
-
-    // Header row with creation date/time shown on top right.
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
     ) {
-        if (creationText.isNotEmpty()) {
-            Text(
-                text = creationText,
-                style = MaterialTheme.typography.labelSmall
+        val creationText =
+            formState.creationTimeMillis?.let { "Created: " + formatDateTime(it) } ?: ""
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            if (creationText.isNotEmpty()) {
+                Text(text = creationText, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+
+        OutlinedTextField(
+            value = formState.title,
+            onValueChange = { if (formState.isEditable) onTitleChange(it) },
+            label = { Text("Title") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = formState.isEditable
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = formState.description,
+            onValueChange = { if (formState.isEditable) onDescriptionChange(it) },
+            label = { Text("Description") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = formState.isEditable,
+            minLines = 2
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Row(modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = formState.completionDate,
+                onValueChange = { if (formState.isEditable) onCompletionDateChange(it) },
+                label = { Text("Completion date (dd-MM-yyyy)") },
+                modifier = Modifier.weight(1f),
+                enabled = formState.isEditable
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            OutlinedTextField(
+                value = formState.completionTime,
+                onValueChange = { if (formState.isEditable) onCompletionTimeChange(it) },
+                label = { Text("Time (HH:mm)") },
+                modifier = Modifier.weight(1f),
+                enabled = formState.isEditable
             )
         }
-    }
 
-    Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-    OutlinedTextField(
-        value = formState.title,
-        onValueChange = { if (formState.isEditable) onTitleChange(it) },
-        label = { Text("Title") },
-        modifier = Modifier.fillMaxWidth(),
-        enabled = formState.isEditable
-    )
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    OutlinedTextField(
-        value = formState.description,
-        onValueChange = { if (formState.isEditable) onDescriptionChange(it) },
-        label = { Text("Description") },
-        modifier = Modifier.fillMaxWidth(),
-        enabled = formState.isEditable,
-        minLines = 2
-    )
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    Row(modifier = Modifier.fillMaxWidth()) {
-        OutlinedTextField(
-            value = formState.completionDate,
-            onValueChange = {
-                if (formState.isEditable) onCompletionDateChange(it)
-            },
-            label = { Text("Completion date (dd-MM-yyyy)") },
-            modifier = Modifier.weight(1f),
-            enabled = formState.isEditable
+        DropdownField(
+            label = "Priority",
+            selectedText = formState.priority.label,
+            enabled = formState.isEditable,
+            options = TaskPriority.values().toList(),
+            optionLabel = { it.label },
+            onOptionSelected = { selected -> onPriorityChange(selected) }
         )
-        Spacer(modifier = Modifier.width(8.dp))
-        OutlinedTextField(
-            value = formState.completionTime,
-            onValueChange = {
-                if (formState.isEditable) onCompletionTimeChange(it)
-            },
-            label = { Text("Time (HH:mm)") },
-            modifier = Modifier.weight(1f),
-            enabled = formState.isEditable
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        DropdownField(
+            label = "Status",
+            selectedText = formState.status.label,
+            enabled = formState.isEditable,
+            options = TaskStatus.values().toList(),
+            optionLabel = { it.label },
+            onOptionSelected = { selected -> onStatusChange(selected) }
         )
-    }
 
-    Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-    // Priority dropdown
-    DropdownField(
-        label = "Priority",
-        selectedText = formState.priority.label,
-        enabled = formState.isEditable,
-        options = TaskPriority.values().toList(),
-        optionLabel = { it.label },
-        onOptionSelected = onPriorityChange
-    )
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    // Status dropdown
-    DropdownField(
-        label = "Status",
-        selectedText = formState.status.label,
-        enabled = formState.isEditable,
-        options = TaskStatus.values().toList(),
-        optionLabel = { it.label },
-        onOptionSelected = onStatusChange
-    )
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    Text("Reminders (up to 3 days BEFORE completion):")
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(
-            checked = formState.reminderDay1,
-            onCheckedChange = { if (formState.isEditable) onReminderDay1Change(it) },
-            enabled = formState.isEditable
-        )
-        Text("1 day before")
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(
-            checked = formState.reminderDay2,
-            onCheckedChange = { if (formState.isEditable) onReminderDay2Change(it) },
-            enabled = formState.isEditable
-        )
-        Text("2 days before")
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(
-            checked = formState.reminderDay3,
-            onCheckedChange = { if (formState.isEditable) onReminderDay3Change(it) },
-            enabled = formState.isEditable
-        )
-        Text("3 days before")
-    }
-
-    Spacer(modifier = Modifier.height(8.dp))
-
-    formState.errorMessage?.let { error ->
-        Text(
-            text = error,
-            color = MaterialTheme.colorScheme.error,
-            style = MaterialTheme.typography.bodySmall
-        )
+        Text("Reminders (up to 3 days BEFORE completion):")
         Spacer(modifier = Modifier.height(4.dp))
-    }
-
-    if (!formState.isEditable) {
-        Text(
-            text = "This task is read-only because the completion time has already passed.",
-            color = MaterialTheme.colorScheme.error,
-            style = MaterialTheme.typography.bodySmall
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End
-    ) {
-        // Delete only when editing an existing task AND editable
-        if (formState.taskIdBeingEdited != null && formState.isEditable) {
-            TextButton(onClick = onDelete) {
-                Text("Delete")
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = formState.reminderDay1,
+                onCheckedChange = { if (formState.isEditable) onReminderDay1Change(it) },
+                enabled = formState.isEditable
+            )
             Spacer(modifier = Modifier.width(8.dp))
+            Text("1 day before")
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = formState.reminderDay2,
+                onCheckedChange = { if (formState.isEditable) onReminderDay2Change(it) },
+                enabled = formState.isEditable
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("2 days before")
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = formState.reminderDay3,
+                onCheckedChange = { if (formState.isEditable) onReminderDay3Change(it) },
+                enabled = formState.isEditable
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("3 days before")
         }
 
-        TextButton(onClick = onCancel) {
-            Text("Cancel")
+        Spacer(modifier = Modifier.height(12.dp))
+
+        formState.errorMessage?.let {
+            Text(text = it, color = MaterialTheme.colorScheme.error)
+            Spacer(modifier = Modifier.height(8.dp))
         }
 
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Button(
-            onClick = onSave,
-            enabled = formState.isEditable
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End
         ) {
-            Text("Save")
+            if (formState.taskIdBeingEdited != null && formState.isEditable) {
+                TextButton(onClick = onDelete) { Text("Delete") }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+            TextButton(onClick = onCancel) { Text("Cancel") }
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(onClick = onSave, enabled = formState.isEditable) { Text("Save") }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }
-
-//  dropdown used for Priority and Status
+//drop down option for priority and status
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> DropdownField(
@@ -392,39 +688,44 @@ fun <T> DropdownField(
     optionLabel: (T) -> String,
     onOptionSelected: (T) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    val keyForSave = selectedText
+    val expandedState = rememberSaveable(keyForSave) { mutableStateOf(false) }
+    val expanded by remember { derivedStateOf { expandedState.value } }
 
     ExposedDropdownMenuBox(
-        expanded = expanded, //menu is open or not
+        expanded = expanded,
         onExpandedChange = {
-            if (enabled) { //prevents dropdown to open when editing disabled
-                expanded = !expanded
+            if (enabled) {
+                expandedState.value = !expandedState.value
             }
         }
     ) {
         OutlinedTextField(
             value = selectedText,
             onValueChange = {},
-            readOnly = true, //prevents keyboard from opening
-            enabled = enabled, //dropdown disabled when form not editable
+            readOnly = true,
+            enabled = enabled,
             label = { Text(label) },
             trailingIcon = {
                 ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
             },
             modifier = Modifier
-                .menuAnchor()   // the menu knows where to anchor
+                .menuAnchor()
                 .fillMaxWidth()
+                .clickable(enabled = enabled) {
+                    expandedState.value = true
+                }
         )
 
         ExposedDropdownMenu(
             expanded = expanded && enabled,
-            onDismissRequest = { expanded = false } //close menu
+            onDismissRequest = { expandedState.value = false }
         ) {
             options.forEach { option ->
                 DropdownMenuItem(
                     text = { Text(optionLabel(option)) },
                     onClick = {
-                        expanded = false
+                        expandedState.value = false
                         onOptionSelected(option)
                     }
                 )
@@ -432,4 +733,3 @@ fun <T> DropdownField(
         }
     }
 }
-

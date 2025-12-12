@@ -4,10 +4,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import android.app.Application
-import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.gson.Gson
+import com.example.taskmanagerapp.domain.model.Task
+import com.example.taskmanagerapp.domain.model.TaskFormState
+import com.example.taskmanagerapp.domain.model.TaskPriority
+import com.example.taskmanagerapp.domain.model.TaskStatus
+import com.example.taskmanagerapp.domain.model.TaskUiState
+import com.example.taskmanagerapp.domain.model.parseToMillis
+import com.example.taskmanagerapp.domain.model.splitDateAndTime
 import kotlinx.coroutines.launch
 
 class TaskViewModel(application: Application) : AndroidViewModel(application) {
@@ -18,19 +23,11 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     private var uIState by mutableStateOf(TaskUiState())
     val uiState: TaskUiState get() = uIState //read-only version of the state
 
-    private val prefsName = "task_manager_prefs"
-    private val tasksKey = "tasks_json"
-    private val nextIdKey = "next_id"
-
-    private val gson = Gson()
-    private val prefs by lazy {
-        getApplication<Application>().getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-    }
-    private val db = AppDatabase.getInstance(getApplication())
-    private val repository = TaskRepository(db.taskDao())
+    // Use the AppModule provider to get the concrete repository implementation
+    private val repository: com.example.taskmanagerapp.domain.repository.TaskRepository =
+        com.example.taskmanagerapp.di.AppModule.provideTaskRepository(getApplication())
 
     init {
-        migratePrefsToDbIfNeeded() // tasks moved from sharedpref to room db
         subscribeToDb() //keep ui in sync with room
     }
 
@@ -93,36 +90,10 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun migratePrefsToDbIfNeeded() {
-        viewModelScope.launch {
-            try {
-                val existing = prefs.getString(tasksKey, null)
-                val alreadyHas = repository.getAllOnce()
-                if (!existing.isNullOrEmpty() && alreadyHas.isEmpty()) {
-                    // parse and insert into DB
-                    val listType = object : com.google.gson.reflect.TypeToken<List<Task>>() {}.type
-                    val loaded: List<Task> = gson.fromJson(existing, listType)
-                    // insert as entities
-                    repository.insertAll(loaded)
-                    // optional: clear prefs so migration runs only once
-                    prefs.edit().remove(tasksKey).apply()
-                } else {
-                    // if DB empty and prefs empty, nothing to do
-                }
-
-                // ensure nextId consistent with DB
-                val max = repository.maxIdOrNull() ?: 0L
-                if (nextId <= max) nextId = max + 1
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
 
      // global error message for the UI.
     private fun setGlobalError(message: String) {
-        // store in the same formState.errorMessage slot so UI can show it via existing form error display
+        // store ERROR MESSAGE so UI can show it through existing form error display
         uIState = uIState.copy(formState = uIState.formState.copy(errorMessage = message))
     }
 
@@ -130,16 +101,6 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     fun clearError() {
         uIState = uIState.copy(formState = uIState.formState.copy(errorMessage = null))
     }
-
-    //Wrapper around persistTasks() that converts exceptions into friendly UI messages.
-//    private fun persistTasksSafely() {
-//        try {
-//            persistTasks()
-//        } catch (t: Throwable) {
-//            t.printStackTrace()
-//            setGlobalError("Saving failed — please check storage permission or try again.")
-//        }
-//    }
 
 
     //Called when user clicks on Add Task button.
@@ -352,7 +313,7 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
                 isFormVisible = false,
                 formState = TaskFormState()
             )
-            updatedTask?.let { updateTaskAsync(it) }
+            updatedTask?.let { updateTaskAsync(it) } //EVERY TIME CALLED TO PERSIST THE CHANGE
 
         }
 
@@ -368,7 +329,7 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             isFormVisible = false, //hide form
             formState = TaskFormState()
         )
-        deleteByIdAsync(id)
+        deleteByIdAsync(id) //delete from database
     }
 
     private fun setError(message: String) {
@@ -446,15 +407,6 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-
-
-     //Helper to find a task index by id (returns -1 if not found)
-
-    fun findTaskIndexById(id: Long): Int {
-        return uIState.tasks.indexOfFirst { it.id == id }
-    }
-
-
      // Mark the task at list index as COMPLETE. Returns the previous Task (so caller can undo),or null if index invalid.
     fun completeTaskAt(index: Int): Task? {
         return try {
@@ -496,6 +448,41 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             setGlobalError("Could not restore the previous task. Please try again.")
         }
     }
+
+
+// Search & Filter UI state (add inside TaskViewModel class)
+
+    // current search query (title + description)
+    private var _searchQuery by mutableStateOf("")
+    val searchQuery: String get() = _searchQuery
+
+    // whether filter panel is toggled on (checkbox). Only shown in UI when tasks.size >= 5
+    private var _filterEnabled by mutableStateOf(false)
+    val filterEnabled: Boolean get() = _filterEnabled
+
+    // which priorities are selected for filtering (set contains TaskPriority names)
+    private var _priorityFilters by mutableStateOf(setOf<TaskPriority>())
+    val priorityFilters: Set<TaskPriority> get() = _priorityFilters
+
+    // public updaters called from UI:
+    fun updateSearchQuery(query: String) {
+        _searchQuery = query
+    }
+
+    fun setFilterEnabled(enabled: Boolean) {
+        _filterEnabled = enabled
+    }
+
+    // toggle a specific priority filter (called when checkbox for a priority toggles)
+    fun togglePriorityFilter(priority: TaskPriority, enabled: Boolean) {
+        _priorityFilters = if (enabled) {
+            _priorityFilters + priority
+        } else {
+            _priorityFilters - priority
+        }
+    }
+
+
 
 
 

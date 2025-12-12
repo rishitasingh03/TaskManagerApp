@@ -18,7 +18,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +48,26 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
+import androidx.compose.material.icons.filled.Add
+import com.example.taskmanagerapp.domain.model.Task
+import com.example.taskmanagerapp.domain.model.TaskFormState
+import com.example.taskmanagerapp.domain.model.TaskPriority
+import com.example.taskmanagerapp.domain.model.TaskStatus
+import com.example.taskmanagerapp.domain.model.TaskUiState
+import com.example.taskmanagerapp.domain.model.formatDateTime
+import com.example.taskmanagerapp.domain.model.splitDateAndTime
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.CardDefaults
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,12 +76,16 @@ fun TaskManagerApp(taskViewModel: TaskViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     MaterialTheme {
         Scaffold(
-            topBar = { TopAppBar(title = { Text("Task Manager") }) },
+            topBar = { CenterAlignedTopAppBar(title = { Text("Task Manager") }) },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
                 if (!uiState.isFormVisible) {
-                    FloatingActionButton(onClick = { taskViewModel.startAddTask() }) {
-                        Text("+")
+                    FloatingActionButton(
+                        onClick = { taskViewModel.startAddTask() },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Add")
                     }
                 }
             }
@@ -94,7 +117,13 @@ fun TaskManagerApp(taskViewModel: TaskViewModel) {
                     onCompleteAt = { idx -> taskViewModel.completeTaskAt(idx) },
                     onRestoreAt = { idx, prev -> taskViewModel.restoreTaskAt(idx, prev) },
                     snackbarHostState = snackbarHostState,
-                    onClearError = { taskViewModel.clearError() }
+                    onClearError = { taskViewModel.clearError() },
+                    searchQuery = taskViewModel.searchQuery,
+                    onSearchQueryChange = taskViewModel::updateSearchQuery,
+                    filterEnabled = taskViewModel.filterEnabled,
+                    onFilterEnabledChange = taskViewModel::setFilterEnabled,
+                    priorityFilters = taskViewModel.priorityFilters,
+                    onTogglePriorityFilter = taskViewModel::togglePriorityFilter
                 )
             }
         }
@@ -125,7 +154,14 @@ fun TaskManagerScreen(
     onRestoreAt: (index: Int, previous: Task) -> Unit,
     snackbarHostState: SnackbarHostState,
     onClearError: () -> Unit,
-    onOpenAdd: () -> Unit = onAddTask
+    onOpenAdd: () -> Unit = onAddTask,
+    // NEW params for search & filter
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    filterEnabled: Boolean,
+    onFilterEnabledChange: (Boolean) -> Unit,
+    priorityFilters: Set<TaskPriority>,
+    onTogglePriorityFilter: (TaskPriority, Boolean) -> Unit
 ) {
     // show global form errors as snackbar
     LaunchedEffect(uiState.formState.errorMessage) {
@@ -136,6 +172,8 @@ fun TaskManagerScreen(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        //val snackbarHostState = remember { SnackbarHostState() } // used by ReorderableTaskList for undo snackbars
+
         // Main content
         Column(
             modifier = Modifier
@@ -156,83 +194,209 @@ fun TaskManagerScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            if (uiState.tasks.isEmpty()) {
-                Text("No tasks yet. Tap + to add a new task.")
-            } else {
-                ReorderableTaskList(
-                    modifier = Modifier.weight(1f),
-                    tasks = uiState.tasks,
-                    onTaskClick = onTaskClick,
-                    onMove = onMove,
-                    onCompleteAt = onCompleteAt,
-                    onRestoreAt = onRestoreAt,
-                    onDeleteAt = onDeleteAt,
-                    onInsertAt = onInsertAt,
-                    snackbarHostState = snackbarHostState
-                )
-            }
+            // SEARCH field
+            var localQuery by remember { mutableStateOf("") }
+            val keyboardController = LocalSoftwareKeyboardController.current
 
-            Spacer(modifier = Modifier.height(8.dp))
-        }
-
-        // Full-screen overlay for form; covers entire screen and blocks interaction below
-        if (uiState.isFormVisible) {
-            Surface(
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .zIndex(100f),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 8.dp
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // Header (custom top bar)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Start
-                    ) {
-                        IconButton(onClick = onCancel) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Close"
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
+                OutlinedTextField(
+                    value = localQuery,
+                    onValueChange = {
+                        localQuery = it
+                    },
+                    label = { Text("Search tasks (title/description)") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search icon"
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(56.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(
+                        onSearch = {
 
+                            keyboardController?.hide()
+                        }
+                    ),
+                    shape = MaterialTheme.shapes.medium
+                )
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                IconButton(
+                    onClick = {
+                        keyboardController?.hide()
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Filter toggle (visible only when 5+ tasks)
+            val showFilterToggle = uiState.tasks.size >= 5
+            var filterEnabled by remember { mutableStateOf(false) }
+            var priorityHigh by remember { mutableStateOf(false) }
+            var priorityMedium by remember { mutableStateOf(false) }
+            var priorityLow by remember { mutableStateOf(false) }
+
+            if (showFilterToggle) {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = { filterEnabled = !filterEnabled },
+                        shape = MaterialTheme.shapes.small,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    ) {
                         Text(
-                            text = if (uiState.formState.taskIdBeingEdited == null) "New Task" else "Edit Task",
-                            style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.align(Alignment.CenterVertically)
+                            text = if (filterEnabled) "Filter by Priority" else "Filter by Priority",
+                            style = MaterialTheme.typography.bodyMedium
                         )
                     }
+                }
 
-                    // Scrollable form area
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 16.dp)
-                            .imePadding()
-                    ) {
-                        TaskForm(
+                    if (filterEnabled) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()) {
+                            Checkbox(
+                                checked = priorityHigh,
+                                onCheckedChange = { priorityHigh = it }
+                            )
+                            Text("High")
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Checkbox(
+                                checked = priorityMedium,
+                                onCheckedChange = { priorityMedium = it }
+                            )
+                            Text("Medium")
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Checkbox(
+                                checked = priorityLow,
+                                onCheckedChange = { priorityLow = it }
+                            )
+                            Text("Low")
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                
+
+                // compute filtered + searched list
+                val q = localQuery.trim().lowercase()
+                val displayedTasks = uiState.tasks.filter { t ->
+                    val matchesQuery = q.isEmpty() ||
+                            t.title.lowercase().contains(q) ||
+                            t.description.lowercase().contains(q)
+                    val priorityPass = if (!filterEnabled) {
+                        true
+                    } else {
+                        // if no priority box selected - show all
+                        val anySelected = priorityHigh || priorityMedium || priorityLow
+                        if (!anySelected) true else (
+                                (priorityHigh && t.priority == TaskPriority.HIGH) ||
+                                        (priorityMedium && t.priority == TaskPriority.MEDIUM) ||
+                                        (priorityLow && t.priority == TaskPriority.LOW)
+                                )
+                    }
+                    matchesQuery && priorityPass
+                }
+
+                if (displayedTasks.isEmpty()) {
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        Text("No tasks match your search or filters.")
+                    }
+                } else {
+                    ReorderableTaskList(
+                        modifier = Modifier.weight(1f),
+                        tasks = displayedTasks,
+                        onTaskClick = onTaskClick,
+                        onMove = onMove,
+                        onCompleteAt = onCompleteAt,
+                        onRestoreAt = onRestoreAt,
+                        onDeleteAt = onDeleteAt,
+                        onInsertAt = onInsertAt,
+                        snackbarHostState = snackbarHostState
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            // Full-screen overlay for form; covers entire screen and blocks interaction below
+            if (uiState.isFormVisible) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(100f),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 8.dp
+                ) {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        // Header (custom top bar)
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .align(Alignment.TopCenter),
-                            formState = uiState.formState,
-                            onTitleChange = onTitleChange,
-                            onDescriptionChange = onDescriptionChange,
-                            onCompletionDateChange = onCompletionDateChange,
-                            onCompletionTimeChange = onCompletionTimeChange,
-                            onPriorityChange = onPriorityChange,
-                            onStatusChange = onStatusChange,
-                            onReminderDay1Change = onReminderDay1Change,
-                            onReminderDay2Change = onReminderDay2Change,
-                            onReminderDay3Change = onReminderDay3Change,
-                            onCancel = onCancel,
-                            onSave = onSave,
-                            onDelete = onDelete
-                        )
+                                .padding(horizontal = 8.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Start
+                        ) {
+                            IconButton(onClick = onCancel) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close"
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Text(
+                                text = if (uiState.formState.taskIdBeingEdited == null) "New Task" else "Edit Task",
+                                style = MaterialTheme.typography.titleMedium,
+                                modifier = Modifier.align(Alignment.CenterVertically)
+                            )
+                        }
+
+                        // Scrollable form area
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 16.dp)
+                                .imePadding()
+                        ) {
+                            TaskForm(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .align(Alignment.TopCenter),
+                                formState = uiState.formState,
+                                onTitleChange = onTitleChange,
+                                onDescriptionChange = onDescriptionChange,
+                                onCompletionDateChange = onCompletionDateChange,
+                                onCompletionTimeChange = onCompletionTimeChange,
+                                onPriorityChange = onPriorityChange,
+                                onStatusChange = onStatusChange,
+                                onReminderDay1Change = onReminderDay1Change,
+                                onReminderDay2Change = onReminderDay2Change,
+                                onReminderDay3Change = onReminderDay3Change,
+                                onCancel = onCancel,
+                                onSave = onSave,
+                                onDelete = onDelete
+                            )
+                        }
                     }
                 }
             }
@@ -387,7 +551,7 @@ fun ReorderableTaskList(
                         var accumulatedDy = 0f //sum of vertical deltas while user drags
 
                         detectDragGesturesAfterLongPress(
-                            onDragStart = { //after lonf press drag starts
+                            onDragStart = { //after long press drag starts
                                 draggingId = task.id
                                 accumulatedDy = 0f
                             },
@@ -472,57 +636,73 @@ fun ReorderableTaskList(
 fun TaskListItem(task: Task, onClick: () -> Unit) {
     val (dateString, timeString) = splitDateAndTime(task.completionTimeMillis)
 
-    Column(
+    ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
-            .padding(vertical = 4.dp)
+            .padding(horizontal = 1.dp, vertical = 4.dp)
+            .height(100.dp)
+            .clickable { onClick() },
+        shape = MaterialTheme.shapes.medium,
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(12.dp)
         ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = task.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(12.dp),
+                    tonalElevation = 2.dp
+                ) {
+                    Text(
+                        text = task.priority.label,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
             Text(
-                text = task.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
+                text = task.description,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
+
+            Spacer(modifier = Modifier.height(4.dp))
+
             Text(
-                text = task.priority.label,
-                style = MaterialTheme.typography.labelMedium
-            )
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        Text(
-            text = task.description,
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        Spacer(modifier = Modifier.height(4.dp))
-
-        Text(
-            text = "Status: ${task.status.label}",
-            style = MaterialTheme.typography.bodySmall
-        )
-
-        Text(
-            text = "Completion: $dateString $timeString",
-            style = MaterialTheme.typography.bodySmall
-        )
-
-        if (task.reminderDaysBefore.isNotEmpty()) {
-            Text(
-                text = "Reminders: ${
-                    task.reminderDaysBefore.joinToString { "$it day(s) before" }
-                }",
+                text = "Status: ${task.status.label}",
                 style = MaterialTheme.typography.bodySmall
             )
+
+            Text(
+                text = "Completion: $dateString $timeString",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            if (task.reminderDaysBefore.isNotEmpty()) {
+                Text(
+                    text = "Reminders: ${
+                        task.reminderDaysBefore.joinToString { "$it day(s) before" }
+                    }",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
 }
@@ -732,4 +912,6 @@ fun <T> DropdownField(
             }
         }
     }
+
+
 }

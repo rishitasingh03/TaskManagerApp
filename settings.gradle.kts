@@ -21,4 +21,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "Task Manager App"
 include(":app")
- 
+include(":domain")
+include(":data")

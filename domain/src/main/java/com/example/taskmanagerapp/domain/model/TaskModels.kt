@@ -1,4 +1,4 @@
-package com.example.taskmanagerapp
+package com.example.taskmanagerapp.domain.model
 
 import java.text.ParseException
 import java.text.SimpleDateFormat
@@ -39,19 +39,19 @@ data class Task(
 
  //UI state for the task form (Add or Edit).
 data class TaskFormState(
-    val taskIdBeingEdited: Long? = null, // null = new task
-    val title: String = "",
-    val description: String = "",
-    val completionDate: String = "",
-    val completionTime: String = "",
-    val priority: TaskPriority = TaskPriority.MEDIUM,
-    val status: TaskStatus = TaskStatus.NOT_STARTED,
-    val reminderDay1: Boolean = false,
-    val reminderDay2: Boolean = false,
-    val reminderDay3: Boolean = false,
-    val creationTimeMillis: Long? = null,
-    val isEditable: Boolean = true,      //false if deadline already passed
-    val errorMessage: String? = null //validation error
+     val taskIdBeingEdited: Long? = null, // null = new task
+     val title: String = "",
+     val description: String = "",
+     val completionDate: String = "",
+     val completionTime: String = "",
+     val priority: TaskPriority = TaskPriority.MEDIUM,
+     val status: TaskStatus = TaskStatus.NOT_STARTED,
+     val reminderDay1: Boolean = false,
+     val reminderDay2: Boolean = false,
+     val reminderDay3: Boolean = false,
+     val creationTimeMillis: Long? = null,
+     val isEditable: Boolean = true,      //false if deadline already passed
+     val errorMessage: String? = null //validation error
 )
 
 

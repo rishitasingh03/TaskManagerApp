@@ -1,11 +1,12 @@
 package com.example.taskmanagerapp
 
+import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.taskmanagerapp.di.AppModule
 import com.example.taskmanagerapp.domain.model.Task
 import com.example.taskmanagerapp.domain.model.TaskFormState
 import com.example.taskmanagerapp.domain.model.TaskPriority
@@ -13,24 +14,36 @@ import com.example.taskmanagerapp.domain.model.TaskStatus
 import com.example.taskmanagerapp.domain.model.TaskUiState
 import com.example.taskmanagerapp.domain.model.parseToMillis
 import com.example.taskmanagerapp.domain.model.splitDateAndTime
+import com.example.taskmanagerapp.domain.repository.TaskRepository
 import kotlinx.coroutines.launch
 
-class TaskViewModel(application: Application) : AndroidViewModel(application) {
+class TaskViewModel(
+    application: Application,
+    private val repository: TaskRepository = AppModule.provideTaskRepository(application),
+    private val enableDbSync: Boolean = true
+) : AndroidViewModel(application) {
 
+    // Counter used to generate unique IDs for new tasks.
+    // This is kept in ViewModel to avoid UI responsibility
+    // and to stay consistent with tasks coming from DB.
     private var nextId = 1L //counter for id (long)
 
-    // Backing state for the screen
+    // Backing UI state for the task screen
+    // All UI-visible data flows through this single state object to keep the UI reactive and predictable.
     private var uIState by mutableStateOf(TaskUiState())
     val uiState: TaskUiState get() = uIState //read-only version of the state
 
-    // Use the AppModule provider to get the concrete repository implementation
-    private val repository: com.example.taskmanagerapp.domain.repository.TaskRepository =
-        com.example.taskmanagerapp.di.AppModule.provideTaskRepository(getApplication())
 
     init {
-        subscribeToDb() //keep ui in sync with room
-    }
+        // On ViewModel creation, subscribe to Room DB updates.
+        // This ensures UI always reflects the latest persisted data and avoids manual task list synchronization in UI.
+        if (enableDbSync) {
+            subscribeToDb() //keep ui in sync with room
+        }
 
+    }
+    // Insert a new task into the database.
+    // Runs on a coroutine to avoid blocking the UI thread.
     private fun insertTaskAsync(task: Task) {
         viewModelScope.launch {
             try {
@@ -42,6 +55,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Update an existing task in the database.
+    // Called after editing task details or reordering.
     private fun updateTaskAsync(task: Task) {
         viewModelScope.launch {
             try {
@@ -64,6 +79,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // Delete a task from database using its ID.
+    // Used for swipe-to-delete and form delete action.
     private fun deleteByIdAsync(id: Long) {
         viewModelScope.launch {
             try {
@@ -75,12 +92,13 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-
+    // Collects task list from database as a Flow.
+    // Keeps UI state in sync with Room automatically.
     private fun subscribeToDb() {
         // collect tasks from repo and update UI state
         viewModelScope.launch {
             repository.tasksFlow().collect { domainTasks ->
-                // ensure nextId remains unique: set nextId to max(existing ids)+1 if needed
+                // ensure nextId remains unique: set nextId to max(existing ids)+1 if needed, this avoids duplicate IDs when app restarts
                 if (domainTasks.isNotEmpty()) {
                     val maxId = domainTasks.maxOf { it.id }
                     if (nextId <= maxId) nextId = maxId + 1
@@ -91,19 +109,22 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
-     // global error message for the UI.
+    // Sets a global error message in form state.
+    // UI shows this error using a snackbar.
     private fun setGlobalError(message: String) {
         // store ERROR MESSAGE so UI can show it through existing form error display
         uIState = uIState.copy(formState = uIState.formState.copy(errorMessage = message))
     }
 
-    //Clear the global error after UI consumes it
+    // Clears error after UI has displayed it.
+    // Prevents the same error from showing again.
     fun clearError() {
         uIState = uIState.copy(formState = uIState.formState.copy(errorMessage = null))
     }
 
 
-    //Called when user clicks on Add Task button.
+    //Called when user clicks on Add Task button.Initializes form state for adding a new task.
+    // Resets all fields and makes the form visible.
     fun startAddTask() {
         val now = System.currentTimeMillis()
         uIState = uIState.copy(
@@ -128,6 +149,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
 
     // Called when user clicks on a task in the list to edit it.
+    // Pre-fills form with selected task data for editing.
+    // Editing is disabled if task completion time has already passed.
 
     fun startEditTask(task: Task) {
         //completionTimeMillis is splitted into completion date and time
@@ -157,7 +180,9 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-//Field Updaters
+    //Field Update functions
+    // Called directly from UI when user edits form fields.
+    // Each update also clears any existing error message.
 
     fun updateTitle(value: String) {
         uIState = uIState.copy(
@@ -215,7 +240,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
     //Form Actions
 
-    // User cancels form (either Add or Edit).
+    // Cancels add/edit operation.
+    // Hides the form and resets form state to default.
     fun cancelEditing() {
         uIState = uIState.copy(
             isFormVisible = false, //hides form
@@ -224,7 +250,9 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
-    // Save button clicked- validate inputs, then add/update task.
+    // Validates form input and saves the task.
+    // Handles both add and edit flows in one place.
+    // All business rules for task creation live here.
     fun saveTask() {
         val current = uIState.formState
 
@@ -236,7 +264,7 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             )
             return
         }
-
+    // Validation checks to ensure task data is correct before saving it to the database.
         if (current.title.isBlank()) {
             setError("Title is required.")
             return
@@ -263,7 +291,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Build reminder list from checkboxes (max 3)
+        // Build reminder day list based on selected checkboxes.
+    // Max three reminder options are supported.
         val reminderDays = mutableListOf<Int>()
         if (current.reminderDay1) reminderDays.add(1)
         if (current.reminderDay2) reminderDays.add(2)
@@ -285,11 +314,11 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
                 orderIndex = uIState.tasks.size
             )
             uIState = uIState.copy(
-                tasks = uIState.tasks + newTask,
                 isFormVisible = false,
                 formState = TaskFormState()
             )
             insertTaskAsync(newTask)
+
         } else {
             // Edit existing task
             val updatedTasks = uIState.tasks.map { existing ->
@@ -309,17 +338,16 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
             val editedId = current.taskIdBeingEdited
             val updatedTask = updatedTasks.firstOrNull { it.id == editedId }
             uIState = uIState.copy(
-                tasks = updatedTasks,
                 isFormVisible = false,
                 formState = TaskFormState()
             )
             updatedTask?.let { updateTaskAsync(it) } //EVERY TIME CALLED TO PERSIST THE CHANGE
 
-        }
 
-        // schedule actual reminder
+        }
     }
-    // Delete the task currently being edited.
+    // Delete the task currently being edited
+    // used from the task edit form
 
     fun deleteCurrentTask() {
         val id = uIState.formState.taskIdBeingEdited ?: return
@@ -340,7 +368,6 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
 
      // Delete task at the given list index. Returns the removed Task or null if invalid index.
-
     fun deleteTaskAt(index: Int): Task? {
         return try {
             val tasks = uIState.tasks
@@ -360,7 +387,6 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
 
 
       //Insert a task at index,if index > size, append to end.
-
     fun insertTaskAt(index: Int, task: Task) {
         try {
             val tasks = uIState.tasks.toMutableList()
@@ -375,8 +401,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
-     //Move a task from one list index to another.
-
+    // Reorders tasks when user drags an item.
+    // Updates orderIndex and persists new order to database.
     fun moveTask(fromIndex: Int, toIndex: Int) {
         try {
             val tasks = uIState.tasks.toMutableList()
@@ -450,7 +476,8 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     }
 
 
-// Search & Filter UI state (add inside TaskViewModel class)
+// Search and filter state for task list.
+// These values control how tasks are displayed in UI.
 
     // current search query (title + description)
     private var _searchQuery by mutableStateOf("")
@@ -460,11 +487,11 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
     private var _filterEnabled by mutableStateOf(false)
     val filterEnabled: Boolean get() = _filterEnabled
 
-    // which priorities are selected for filtering (set contains TaskPriority names)
+    // which priorities are selected for filtering
     private var _priorityFilters by mutableStateOf(setOf<TaskPriority>())
     val priorityFilters: Set<TaskPriority> get() = _priorityFilters
 
-    // public updaters called from UI:
+    // Updates search query used to filter tasks by title or description.
     fun updateSearchQuery(query: String) {
         _searchQuery = query
     }
@@ -482,9 +509,43 @@ class TaskViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+// Derived UI data based on current tasks and filters.
+// UI reads these values but never modifies them directly.
+
+    // Decide when filter UI should be shown
+    val shouldShowFilter: Boolean
+        get() = uIState.tasks.size >= 5
+
+    // Compute the list of tasks to be displayed based on search + filters
+    val displayedTasks: List<Task>
+        get() {
+            val q = searchQuery.trim().lowercase()
+
+            return uIState.tasks.filter { task ->
+                val matchesQuery =
+                    q.isEmpty() ||
+                            task.title.lowercase().contains(q) ||
+                            task.description.lowercase().contains(q)
+
+                val priorityPass =
+                    if (!filterEnabled) true
+                    else if (priorityFilters.isEmpty()) true
+                    else priorityFilters.contains(task.priority)
+
+                matchesQuery && priorityPass
+            }
+        }
+    // Message shown when no tasks are visible.
+// Decides whether empty state is due to filters or no tasks at all.
+    val emptyStateMessage: String?
+        get() = when {
+            displayedTasks.isNotEmpty() -> null
+            searchQuery.isNotBlank() || filterEnabled ->
+                "No tasks match your search or filters."
+            else ->
+                "No tasks yet. Tap + to add one."
+        }}
 
 
 
-
-}
 

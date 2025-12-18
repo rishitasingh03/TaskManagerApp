@@ -68,18 +68,22 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 
 
-
+// Root composable of the task feature.
+// Responsible only for wiring ViewModel state + events to UI composables.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TaskManagerApp(taskViewModel: TaskViewModel) {
     val uiState = taskViewModel.uiState
     val snackbarHostState = remember { SnackbarHostState() }
     MaterialTheme {
+        // Scaffold provides top bar, FAB, snackbar host and main content layout.
         Scaffold(
             topBar = { CenterAlignedTopAppBar(title = { Text("Task Manager") }) },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             floatingActionButton = {
                 if (!uiState.isFormVisible) {
+                    // Floating action button is shown only when task form is not visible.
+                    // It triggers the add new task flow through ViewModel.
                     FloatingActionButton(
                         onClick = { taskViewModel.startAddTask() },
                         containerColor = MaterialTheme.colorScheme.primary,
@@ -95,8 +99,13 @@ fun TaskManagerApp(taskViewModel: TaskViewModel) {
                     .fillMaxSize()
                     .padding(innerPadding)
             ) {
+                // Main screen composable
+                // ViewModel-derived state is passed down to keep UI stateless and declarative.
                 TaskManagerScreen(
                     uiState = uiState,
+                    displayedTasks = taskViewModel.displayedTasks,
+                    showFilterToggle = taskViewModel.shouldShowFilter,
+                    emptyStateMessage = taskViewModel.emptyStateMessage,
                     onAddTask = { taskViewModel.startAddTask() },
                     onTaskClick = { taskViewModel.startEditTask(it) },
                     onTitleChange = taskViewModel::updateTitle,
@@ -129,10 +138,14 @@ fun TaskManagerApp(taskViewModel: TaskViewModel) {
         }
     }
 }
-
+// High-level screen composable.
+// Composes smaller feature-specific UI blocks (search, filter, list, form)
 @Composable
 fun TaskManagerScreen(
     uiState: TaskUiState,
+    displayedTasks: List<Task>,
+    showFilterToggle: Boolean,
+    emptyStateMessage: String?,
     onAddTask: () -> Unit,
     onTaskClick: (Task) -> Unit,
     onTitleChange: (String) -> Unit,
@@ -147,15 +160,13 @@ fun TaskManagerScreen(
     onCancel: () -> Unit,
     onSave: () -> Unit,
     onDelete: () -> Unit,
-    onMove: (fromIndex: Int, toIndex: Int) -> Unit,
-    onDeleteAt: (index: Int) -> Task?,
-    onInsertAt: (index: Int, task: Task) -> Unit,
-    onCompleteAt: (index: Int) -> Task?,
-    onRestoreAt: (index: Int, previous: Task) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onDeleteAt: (Int) -> Task?,
+    onInsertAt: (Int, Task) -> Unit,
+    onCompleteAt: (Int) -> Task?,
+    onRestoreAt: (Int, Task) -> Unit,
     snackbarHostState: SnackbarHostState,
     onClearError: () -> Unit,
-    onOpenAdd: () -> Unit = onAddTask,
-    // NEW params for search & filter
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     filterEnabled: Boolean,
@@ -163,246 +174,215 @@ fun TaskManagerScreen(
     priorityFilters: Set<TaskPriority>,
     onTogglePriorityFilter: (TaskPriority, Boolean) -> Unit
 ) {
-    // show global form errors as snackbar
+
+    // Snackbar error handling (UI side-effect)
     LaunchedEffect(uiState.formState.errorMessage) {
-        uiState.formState.errorMessage?.let { message ->
-            snackbarHostState.showSnackbar(message = message, duration = SnackbarDuration.Short)
+        uiState.formState.errorMessage?.let {
+            snackbarHostState.showSnackbar(it)
             onClearError()
         }
     }
+// Vertical layout for main screen content
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        //val snackbarHostState = remember { SnackbarHostState() } // used by ReorderableTaskList for undo snackbars
+        TaskHeader()
 
-        // Main content
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Your Tasks",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+        Spacer(Modifier.height(8.dp))
 
-            Spacer(modifier = Modifier.height(8.dp))
+        SearchBar(
+            query = searchQuery,
+            onQueryChange = onSearchQueryChange
+        )
 
-            // SEARCH field
-            var localQuery by remember { mutableStateOf("") }
-            val keyboardController = LocalSoftwareKeyboardController.current
+        Spacer(Modifier.height(8.dp))
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = localQuery,
-                    onValueChange = {
-                        localQuery = it
-                    },
-                    label = { Text("Search tasks (title/description)") },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = "Search icon"
-                        )
-                    },
-                    singleLine = true,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(56.dp),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(
-                        onSearch = {
+        FilterSection(
+            showFilterToggle = showFilterToggle,
+            filterEnabled = filterEnabled,
+            priorityFilters = priorityFilters,
+            onFilterEnabledChange = onFilterEnabledChange,
+            onTogglePriorityFilter = onTogglePriorityFilter
+        )
 
-                            keyboardController?.hide()
+        Spacer(Modifier.height(8.dp))
+
+        TaskListSection(
+            displayedTasks = displayedTasks,
+            emptyStateMessage = emptyStateMessage,
+            onTaskClick = onTaskClick,
+            onMove = onMove,
+            onDeleteAt = onDeleteAt,
+            onInsertAt = onInsertAt,
+            onCompleteAt = onCompleteAt,
+            onRestoreAt = onRestoreAt,
+            snackbarHostState = snackbarHostState
+        )
+    }
+
+    TaskFormOverlay(
+        uiState = uiState,
+        onTitleChange = onTitleChange,
+        onDescriptionChange = onDescriptionChange,
+        onCompletionDateChange = onCompletionDateChange,
+        onCompletionTimeChange = onCompletionTimeChange,
+        onPriorityChange = onPriorityChange,
+        onStatusChange = onStatusChange,
+        onReminderDay1Change = onReminderDay1Change,
+        onReminderDay2Change = onReminderDay2Change,
+        onReminderDay3Change = onReminderDay3Change,
+        onCancel = onCancel,
+        onSave = onSave,
+        onDelete = onDelete
+    )
+}
+
+// Simple header displaying screen title.
+@Composable
+fun TaskHeader() {
+    Text(
+        text = "Your Tasks",
+        style = MaterialTheme.typography.titleLarge,
+        fontWeight = FontWeight.Bold
+    )
+}
+
+// Search input field
+// Emits user query changes to ViewModel, does not perform filtering itself
+@Composable
+fun SearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit
+) {// for controlling keyboard
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        label = { Text("Search tasks") },
+        leadingIcon = { Icon(Icons.Default.Search, null) },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        //// Keyboard action hides the keyboard on search for better UX.
+        keyboardActions = KeyboardActions { keyboardController?.hide() }
+    )
+}
+
+// Filter controls for task list
+// Visibility and filtering rules are decided by ViewModel and passed as parameters
+@Composable
+fun FilterSection(
+    showFilterToggle: Boolean,
+    filterEnabled: Boolean,
+    priorityFilters: Set<TaskPriority>,
+    onFilterEnabledChange: (Boolean) -> Unit,
+    onTogglePriorityFilter: (TaskPriority, Boolean) -> Unit
+) {// Do not render filter UI if ViewModel says filtering is not applicable
+    if (!showFilterToggle) return
+
+    Column {
+        Button(onClick = { onFilterEnabledChange(!filterEnabled) }) {
+            Text("Filter by Priority")
+        }
+
+        if (filterEnabled) {
+            Row {
+                TaskPriority.values().forEach { priority ->
+                    // Priority checkboxes allow multi-select filtering
+                    // Actual filtering logic is handled in ViewModel
+                    Checkbox(
+                        checked = priorityFilters.contains(priority),
+                        onCheckedChange = {
+                            onTogglePriorityFilter(priority, it)
                         }
-                    ),
-                    shape = MaterialTheme.shapes.medium
-                )
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                IconButton(
-                    onClick = {
-                        keyboardController?.hide()
-                    },
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
-                        tint = MaterialTheme.colorScheme.primary
                     )
-                }
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Filter toggle (visible only when 5+ tasks)
-            val showFilterToggle = uiState.tasks.size >= 5
-            var filterEnabled by remember { mutableStateOf(false) }
-            var priorityHigh by remember { mutableStateOf(false) }
-            var priorityMedium by remember { mutableStateOf(false) }
-            var priorityLow by remember { mutableStateOf(false) }
-
-            if (showFilterToggle) {
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = { filterEnabled = !filterEnabled },
-                        shape = MaterialTheme.shapes.small,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = if (filterEnabled) "Filter by Priority" else "Filter by Priority",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
-
-                    if (filterEnabled) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()) {
-                            Checkbox(
-                                checked = priorityHigh,
-                                onCheckedChange = { priorityHigh = it }
-                            )
-                            Text("High")
-                            Spacer(modifier = Modifier.width(8.dp))
-
-                            Checkbox(
-                                checked = priorityMedium,
-                                onCheckedChange = { priorityMedium = it }
-                            )
-                            Text("Medium")
-                            Spacer(modifier = Modifier.width(8.dp))
-
-                            Checkbox(
-                                checked = priorityLow,
-                                onCheckedChange = { priorityLow = it }
-                            )
-                            Text("Low")
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                    }
-                
-
-                // compute filtered + searched list
-                val q = localQuery.trim().lowercase()
-                val displayedTasks = uiState.tasks.filter { t ->
-                    val matchesQuery = q.isEmpty() ||
-                            t.title.lowercase().contains(q) ||
-                            t.description.lowercase().contains(q)
-                    val priorityPass = if (!filterEnabled) {
-                        true
-                    } else {
-                        // if no priority box selected - show all
-                        val anySelected = priorityHigh || priorityMedium || priorityLow
-                        if (!anySelected) true else (
-                                (priorityHigh && t.priority == TaskPriority.HIGH) ||
-                                        (priorityMedium && t.priority == TaskPriority.MEDIUM) ||
-                                        (priorityLow && t.priority == TaskPriority.LOW)
-                                )
-                    }
-                    matchesQuery && priorityPass
-                }
-
-                if (displayedTasks.isEmpty()) {
-                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        Text("No tasks match your search or filters.")
-                    }
-                } else {
-                    ReorderableTaskList(
-                        modifier = Modifier.weight(1f),
-                        tasks = displayedTasks,
-                        onTaskClick = onTaskClick,
-                        onMove = onMove,
-                        onCompleteAt = onCompleteAt,
-                        onRestoreAt = onRestoreAt,
-                        onDeleteAt = onDeleteAt,
-                        onInsertAt = onInsertAt,
-                        snackbarHostState = snackbarHostState
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            // Full-screen overlay for form; covers entire screen and blocks interaction below
-            if (uiState.isFormVisible) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(100f),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 8.dp
-                ) {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        // Header (custom top bar)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Start
-                        ) {
-                            IconButton(onClick = onCancel) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Close"
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-
-                            Text(
-                                text = if (uiState.formState.taskIdBeingEdited == null) "New Task" else "Edit Task",
-                                style = MaterialTheme.typography.titleMedium,
-                                modifier = Modifier.align(Alignment.CenterVertically)
-                            )
-                        }
-
-                        // Scrollable form area
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 16.dp)
-                                .imePadding()
-                        ) {
-                            TaskForm(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .align(Alignment.TopCenter),
-                                formState = uiState.formState,
-                                onTitleChange = onTitleChange,
-                                onDescriptionChange = onDescriptionChange,
-                                onCompletionDateChange = onCompletionDateChange,
-                                onCompletionTimeChange = onCompletionTimeChange,
-                                onPriorityChange = onPriorityChange,
-                                onStatusChange = onStatusChange,
-                                onReminderDay1Change = onReminderDay1Change,
-                                onReminderDay2Change = onReminderDay2Change,
-                                onReminderDay3Change = onReminderDay3Change,
-                                onCancel = onCancel,
-                                onSave = onSave,
-                                onDelete = onDelete
-                            )
-                        }
-                    }
+                    Text(priority.label)
                 }
             }
         }
     }
 }
+
+// Displays either the task list or an empty state message
+// The decision of what message to show is made in ViewModel
+@Composable
+fun TaskListSection(
+    displayedTasks: List<Task>,
+    emptyStateMessage: String?,
+    onTaskClick: (Task) -> Unit,
+    onMove: (Int, Int) -> Unit,
+    onDeleteAt: (Int) -> Task?,
+    onInsertAt: (Int, Task) -> Unit,
+    onCompleteAt: (Int) -> Task?,
+    onRestoreAt: (Int, Task) -> Unit,
+    snackbarHostState: SnackbarHostState
+) {// Empty state UI when there are no tasks to display
+    if (emptyStateMessage != null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(emptyStateMessage)
+        }
+        // Task list with swipe and drag interactions
+    } else {
+        ReorderableTaskList(
+            modifier = Modifier.fillMaxSize(),
+            tasks = displayedTasks,
+            onTaskClick = onTaskClick,
+            onMove = onMove,
+            onDeleteAt = onDeleteAt,
+            onInsertAt = onInsertAt,
+            onCompleteAt = onCompleteAt,
+            onRestoreAt = onRestoreAt,
+            snackbarHostState = snackbarHostState
+        )
+    }
+}
+
+// Full-screen overlay for creating or editing a task
+// Visibility and editability are controlled by ViewModel state
+@Composable
+fun TaskFormOverlay(
+    uiState: TaskUiState,
+    onTitleChange: (String) -> Unit,
+    onDescriptionChange: (String) -> Unit,
+    onCompletionDateChange: (String) -> Unit,
+    onCompletionTimeChange: (String) -> Unit,
+    onPriorityChange: (TaskPriority) -> Unit,
+    onStatusChange: (TaskStatus) -> Unit,
+    onReminderDay1Change: (Boolean) -> Unit,
+    onReminderDay2Change: (Boolean) -> Unit,
+    onReminderDay3Change: (Boolean) -> Unit,
+    onCancel: () -> Unit,
+    onSave: () -> Unit,
+    onDelete: () -> Unit
+) { // Do not render form when not active
+    if (!uiState.isFormVisible) return
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        tonalElevation = 8.dp
+    ) {
+        TaskForm(
+            formState = uiState.formState,
+            onTitleChange = onTitleChange,
+            onDescriptionChange = onDescriptionChange,
+            onCompletionDateChange = onCompletionDateChange,
+            onCompletionTimeChange = onCompletionTimeChange,
+            onPriorityChange = onPriorityChange,
+            onStatusChange = onStatusChange,
+            onReminderDay1Change = onReminderDay1Change,
+            onReminderDay2Change = onReminderDay2Change,
+            onReminderDay3Change = onReminderDay3Change,
+            onCancel = onCancel,
+            onSave = onSave,
+            onDelete = onDelete
+        )
+    }
+}
+
 
  // When long-press drag starts, track vertical drag distance (dy).
  // Every time dy crosses one item height, move the item up/down by 1 index.
@@ -632,6 +612,7 @@ fun ReorderableTaskList(
     } // Box
 }
 
+// Visual representation of a single task in the list. Displays title, priority, status, completion time and reminder info.
 @Composable
 fun TaskListItem(task: Task, onClick: () -> Unit) {
     val (dateString, timeString) = splitDateAndTime(task.completionTimeMillis)
@@ -707,6 +688,8 @@ fun TaskListItem(task: Task, onClick: () -> Unit) {
     }
 }
 
+// Task creation/editing form
+// UI reflects form state from ViewModel and forwards user actions via callbacks
 @Composable
 fun TaskForm(
     modifier: Modifier = Modifier,
@@ -801,7 +784,7 @@ fun TaskForm(
         )
 
         Spacer(modifier = Modifier.height(12.dp))
-
+// Reminder selection (up to 3 days before completion)
         Text("Reminders (up to 3 days BEFORE completion):")
         Spacer(modifier = Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -857,7 +840,7 @@ fun TaskForm(
         Spacer(modifier = Modifier.height(24.dp))
     }
 }
-//drop down option for priority and status
+//drop down option for priority and status selection
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> DropdownField(

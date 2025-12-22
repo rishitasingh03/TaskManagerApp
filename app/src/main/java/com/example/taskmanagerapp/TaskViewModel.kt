@@ -16,6 +16,8 @@ import com.example.taskmanagerapp.domain.model.parseToMillis
 import com.example.taskmanagerapp.domain.model.splitDateAndTime
 import com.example.taskmanagerapp.domain.repository.TaskRepository
 import kotlinx.coroutines.launch
+import com.example.taskmanagerapp.notification.TaskReminderScheduler
+
 
 class TaskViewModel(
     application: Application,
@@ -318,6 +320,14 @@ class TaskViewModel(
                 formState = TaskFormState()
             )
             insertTaskAsync(newTask)
+            // Schedule reminders for newly created task
+            // This sets daily reminders for HIGH priority
+            // and 1/2/3 day reminders based on user selection
+            TaskReminderScheduler.scheduleReminders(
+                getApplication(),
+                newTask
+            )
+
 
         } else {
             // Edit existing task
@@ -341,7 +351,17 @@ class TaskViewModel(
                 isFormVisible = false,
                 formState = TaskFormState()
             )
-            updatedTask?.let { updateTaskAsync(it) } //EVERY TIME CALLED TO PERSIST THE CHANGE
+            updatedTask?.let {
+                updateTaskAsync(it)
+
+                // Re-schedule reminders after editing task
+                // Old reminders are cancelled and new ones are created
+                TaskReminderScheduler.scheduleReminders(
+                    getApplication(),
+                    it
+                )
+            }
+
 
 
         }
@@ -357,6 +377,16 @@ class TaskViewModel(
             isFormVisible = false, //hide form
             formState = TaskFormState()
         )
+        // Cancel all scheduled reminders before deleting the task
+        // Prevents notifications for deleted tasks
+        val task = uIState.tasks.firstOrNull { it.id == id }
+        task?.let {
+            TaskReminderScheduler.cancelAllReminders(
+                getApplication(),
+                it
+            )
+        }
+
         deleteByIdAsync(id) //delete from database
     }
 
@@ -443,6 +473,13 @@ class TaskViewModel(
             val updated = prev.copy(status = TaskStatus.COMPLETED)
             mutable[index] = updated
             uIState = uIState.copy(tasks = mutable.toList())
+            // Cancel reminders once task is completed
+            // Completed tasks should no longer trigger notifications
+            TaskReminderScheduler.cancelAllReminders(
+                getApplication(),
+                prev
+            )
+
             updateTaskAsync(updated)
             prev
         } catch (t: Throwable) {
@@ -544,8 +581,53 @@ class TaskViewModel(
                 "No tasks match your search or filters."
             else ->
                 "No tasks yet. Tap + to add one."
-        }}
+        }
 
 
+
+
+// Helper functions used only for unit testing.
+
+
+    // Used only in unit tests
+    internal fun setTasksForTest(tasks: List<Task>) {
+        uIState = uIState.copy(tasks = tasks)
+    }
+
+    // Used only in unit tests
+    internal fun filterTasksForTest(
+        query: String,
+        filterEnabled: Boolean,
+        high: Boolean,
+        medium: Boolean,
+        low: Boolean
+    ): List<Task> {
+        return uIState.tasks.filter { t ->
+            val matchesQuery =
+                query.isEmpty() ||
+                        t.title.contains(query, ignoreCase = true) ||
+                        t.description.contains(query, ignoreCase = true)
+
+            val priorityPass =
+                if (!filterEnabled) true
+                else {
+                    val anySelected = high || medium || low
+                    if (!anySelected) true else (
+                            (high && t.priority == TaskPriority.HIGH) ||
+                                    (medium && t.priority == TaskPriority.MEDIUM) ||
+                                    (low && t.priority == TaskPriority.LOW)
+                            )
+                }
+
+            matchesQuery && priorityPass
+        }
+    }
+
+    // Determines whether app content should be shown.
+    // Used to unit test biometric gating logic.
+    fun canShowTasks(isAuthenticated: Boolean): Boolean {
+        return isAuthenticated
+    }
+}
 
 
